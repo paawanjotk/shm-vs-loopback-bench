@@ -1,80 +1,46 @@
-# fast inter-process communication related project - shared memory & loopback socket
+# fast inter-process communication project - shared memory & loopback socket
 
-A small single-producer / multi-consumer latency benchmark comparing two IPC transports for market-data style messages on Linux x86_64:
+Benchmark for two local IPC paths on Linux x86_64:
 
-- A lock-free SPSC ring buffer in POSIX shared memory.
-- A Unix domain `SOCK_STREAM` socket at `/tmp/market.sock`.
+- POSIX shared memory + lock-free SPSC ring buffer
+- Unix domain `SOCK_STREAM` socket at `/tmp/market.sock`
 
-The publisher generates synthetic quotes and can emit them to shared memory, the socket, or both. Two subscribers consume from their respective transports, time each message using `rdtscp`, and print min / p50 / p99 / p99.9 / max latency in nanoseconds after a fixed-size measurement window.
-
-## Repository layout
-
-```
-src/
-  main.cpp                     Role dispatcher + CPU pinning + TSC calibration
-  common/
-    quote.h                    MarketMessageData + Instrument enum
-    ringbuffer.h / .cpp        SPSCQueue<T, size> and SharedMarketDataRegion
-    tsc_clock.h / .cpp         rdtsc_ordered, pin_to_cpu, init_tsc_clock
-    latency_stats.h            Percentile summary + pretty print
-  publisher/
-    publisher.h / .cpp         Publisher with SHM_ONLY / SOCKET_ONLY / BOTH modes
-    xorshift.h                 Small PRNG for the synthetic mid-price walk
-  subscriber-l/
-    subscriber.h / .cpp        Socket (loopback) subscriber
-  subscriber-s/
-    subscriber.h / .cpp        Shared-memory subscriber
-CMakeLists.txt
-```
+The publisher generates synthetic market-data messages. The subscribers timestamp each message with `rdtscp` and report `min`, `p50`, `p99`, `p99.9`, and `max` latency.
 
 ## Build
 
 Requirements:
 
-- Linux x86_64 with an invariant TSC (modern Intel/AMD).
-- CMake 3.15+, a C++17 compiler.
-- `libfmt` and Boost headers installed.
+- Linux x86_64
+- CMake 3.15+
+- C++17 compiler
+- `fmt`
+- Boost headers
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-The binary is `build/HFTApp`.
+Binary: `build/HFTApp`
 
-## Running
+## Roles
 
-The first argument selects the role. Each role pins itself to a dedicated CPU and calibrates the TSC before starting:
+| Role | CPU | Purpose |
+|------|-----|---------|
+| `publisher-shm` | 2 | SHM publisher only |
+| `publisher-socket` | 2 | Socket publisher only |
+| `publisher-both` / `publisher` | 2 | Publishes to both paths |
+| `subscriber-shm` | 3 | SHM consumer |
+| `subscriber-socket` / `subscriber-loopback` | 4 | Socket consumer |
 
-| Role | CPU | What it does |
-|------|-----|--------------|
-| `publisher-shm` | 2 | Publishes to SHM only |
-| `publisher-socket` | 2 | Publishes to Unix socket only |
-| `publisher-both` (alias: `publisher`) | 2 | Publishes to both transports |
-| `subscriber-shm` (alias: `subscriber-shared-memory`) | 3 | Consumes from SHM, prints latency summary |
-| `subscriber-socket` (alias: `subscriber-loopback`) | 4 | Consumes from socket, prints latency summary |
+All roles pin themselves to fixed CPUs and calibrate TSC before running.
 
-Example — benchmark SHM in isolation:
+## Recommended usage
 
-```bash
-# terminal 1
-./build/HFTApp publisher-shm
+### Latency comparison
 
-# terminal 2
-./build/HFTApp subscriber-shm
-```
-
-Example — benchmark socket in isolation:
-
-```bash
-# terminal 1
-./build/HFTApp publisher-socket
-
-# terminal 2
-./build/HFTApp subscriber-socket
-```
-
-Example — both transports driven by the same publisher:
+Use one publisher feeding both subscribers:
 
 ```bash
 # terminal 1
@@ -87,80 +53,103 @@ Example — both transports driven by the same publisher:
 ./build/HFTApp subscriber-socket
 ```
 
-The publisher runs forever. Each subscriber exits after collecting its measurement window and prints one summary line, for example:
+This keeps both subscribers on the same message stream, so the latency comparison is cleaner.
 
-```
-[shm] samples=200000 min_ns=74.91 p50_ns=246.48 p99_ns=14838.52 p999_ns=25756.50 max_ns=26826.25
-```
+### Throughput comparison
 
-## Benchmark protocol
+Run each transport in isolation:
 
-Both subscribers follow the same pattern (see `src/subscriber-s/subscriber.cpp` and `src/subscriber-l/subscriber.cpp`):
+```bash
+# SHM
+./build/HFTApp publisher-shm
+/usr/bin/time -f '%e s wall' ./build/HFTApp subscriber-shm
 
-1. Calibrate the TSC via `init_tsc_clock()` (500 ms `steady_clock` anchor).
-2. Warm up: discard the first `10,000` messages.
-3. Measure: record the next `200,000` cycle deltas into a preallocated vector.
-4. Sort and compute min / p50 / p99 / p99.9 / max using `summarize_cycles` in `src/common/latency_stats.h`.
-5. Print one aggregate summary line tagged with the transport name and exit.
-
-Per-message sample:
-
-```
-cycles = rdtsc_ordered_on_consumer - timestamp_stamped_on_publisher
+# Socket
+./build/HFTApp publisher-socket
+/usr/bin/time -f '%e s wall' ./build/HFTApp subscriber-socket
 ```
 
-For SHM, the publisher stamps `shm_timestamp` right before `push()`. For the socket path, it stamps `send_timestamp` right before `write()`. The consumer stamps `rdtsc_ordered()` right after a successful read.
+This removes cross-transport interaction and gives the cleanest throughput numbers.
 
-## Data model
+## Current benchmark settings
 
-`MarketMessageData` in `src/common/quote.h` is a POD struct:
+- `kWarmupMessages = 100000`
+- `kMeasureMessages = 1000000`
+- Total messages consumed per run: `1100000`
+- SHM queue size: `8192` messages
+- Requested socket buffer size: `256 KB`
+- Effective `SO_SNDBUF` / `SO_RCVBUF` on this machine: `425984` bytes
 
-- `send_timestamp` (u64) — publisher TSC before `write()` to socket.
-- `shm_timestamp`  (u64) — publisher TSC before `push()` into SHM queue.
-- `ask` (u32), `bid` (u32) — integer prices (cents).
-- `instrument` (u16 enum) — currently fixed to `RELIANCE`.
+## Current numbers
 
-A `static_assert(sizeof(MarketMessageData) == 32)` locks the on-wire layout.
+### Latency (`publisher-both`)
 
-## Shared memory layout
+These are the useful transport-latency numbers.
 
-`src/common/ringbuffer.h` defines:
+| Metric | SHM | Socket |
+|--------|----:|-------:|
+| min | ~80 ns | ~1.0 us |
+| p50 | ~175 ns | ~174 us |
+| p99 | ~250 ns | ~420 us |
+| p99.9 | ~3.7-4.2 us | ~0.71-0.78 ms |
 
-- `SPSCQueue<T, size>` — single-producer / single-consumer lock-free ring buffer with power-of-two `size` and `alignas(64)` head/tail indices using relaxed/acquire/release atomics.
-- `SharedMarketDataRegion`:
-  - `std::atomic<uint32_t> ready` — publisher-set readiness flag.
-  - `SPSCQueue<MarketMessageData, kMarketQueueSize>` — the actual ring.
+Interpretation:
 
-The publisher sets `ready = 1` after placement-new on the mmap'd region. The SHM subscriber polls `ready` before entering its measurement loop, which replaces the earlier blind sleep.
+- SHM best-case latency is about **12x lower** than socket best-case latency.
+- SHM typical latency is in the **hundreds of ns**.
+- Socket typical latency is in the **hundreds of us**.
+- Socket tail latency is much larger because it includes syscall, kernel buffering, wakeup, and scheduling effects.
 
-## Architecture
+### Throughput (isolated modes)
 
+Throughput is:
+
+```text
+throughput = 1,100,000 / wall_clock_seconds
 ```
-+-----------------+           shm_timestamp          +-----------------------+
-|  publisher-shm  |-------------------------->       | subscriber-shm        |
-| (CPU 2)         |     SPSCQueue in POSIX SHM       | (CPU 3)               |
-+-----------------+                                  +-----------------------+
 
-+--------------------+        send_timestamp         +-----------------------+
-| publisher-socket   |-------------------------->    | subscriber-socket     |
-| (CPU 2)            |   /tmp/market.sock (UDS)      | (CPU 4)               |
-+--------------------+                               +-----------------------+
+Measure it with:
 
-publisher-both feeds both paths from the same loop.
+```bash
+/usr/bin/time -f '%e s wall' ./build/HFTApp subscriber-shm
+/usr/bin/time -f '%e s wall' ./build/HFTApp subscriber-socket
 ```
 
-## Caveats and tips for clean numbers
+Recent isolated runs on this machine:
 
-- `min_ns` is usually the best estimate of raw transport cost; p50 and tails include OS jitter, cache effects, and CPU frequency/C-state transitions.
-- Starting the subscriber before the publisher lets CPU 3 enter deep idle during the 500 ms retry sleeps. The first post-warmup samples will reflect the CPU ramping back up. To compare runs cleanly, start the publisher first, or increase the warm-up constant, or disable deep C-states.
-- The publisher stamps `shm_timestamp` before spinning on `push()` when the queue is full, so a very slow consumer will inflate the measured "latency" by publisher backpressure. Keep the consumer at least as fast as the producer for transport-only numbers.
-- For the most stable results: pin CPUs via `isolcpus=`, lock the frequency governor to `performance`, and disable SMT on the chosen cores.
-- The Unix socket in `SOCKET_ONLY` publisher mode uses a non-blocking `accept()`; if no subscriber is attached, the publisher still spins and increments `message_count` but sends nothing.
+| Transport | Mode pairing | Wall clock | Throughput |
+|-----------|--------------|-----------:|-----------:|
+| SHM | `publisher-shm` + `subscriber-shm` | ~1.08 s | ~1.02 M msg/s |
+| Socket | `publisher-socket` + `subscriber-socket` | ~1.71-1.86 s | ~0.59-0.64 M msg/s |
 
-## Troubleshooting
+Interpretation:
 
-- `shm_open` fails with `EACCES`: stale `/dev/shm/tryhard` from a prior run. Remove it with `rm /dev/shm/tryhard`.
-- Socket subscriber cannot connect: stale `/tmp/market.sock`. The publisher already calls `unlink()` on startup, but you can remove it manually if something crashed mid-bind.
-- Subscriber hangs on "Attempting to open shared memory": the publisher hasn't created the SHM region yet, or was started in `publisher-socket` mode (no SHM).
-- `sched_setaffinity` error: the selected CPU ID doesn't exist on this machine. Adjust the pinning in `src/main.cpp`.
+- SHM throughput is about **1.6x** socket throughput on this setup.
+- SHM isolated mode is around **1 million messages/sec**.
+- Socket isolated mode is around **0.6 million messages/sec**.
+
+## Important caveats
+
+- `min_ns` is the most direct indicator of raw messaging or handoff performance—a lower bound on the actual transport cost, without queuing or scheduling artifacts. It represents the best observed path under ideal conditions.
+- Percentiles like `p50` and `p99` incorporate effects of transient contention, scheduler interrupts, or jitter; they are valuable for understanding expected and tail behavior, but always expect some spread.
+- `publisher-both` is good for **latency comparison** and soak testing. Isolated publisher modes are better for **throughput**.
+- In SHM isolated mode, latency can become much larger and vary a lot if the queue stays non-empty. In that case you are measuring **queue dwell time + handoff cost**, not just raw shared-memory handoff.
+- The publisher re-stamps `shm_timestamp` immediately before a successful SHM push, so publisher-side backpressure does not get counted as transport latency.
+- The SHM path is lossless while a consumer is attached and lossy otherwise. If no SHM consumer is attached, full-queue pushes are dropped and counted in `shm_dropped`.
+- Larger socket buffers reduce drops / blocking pressure but increase typical socket latency because messages sit longer in the kernel buffer.
+- `max` is not stable. Use `p99` or `p99.9` when comparing runs.
+
+## Code map
+
+Start here if you want to inspect the implementation:
+
+- `src/main.cpp` - role dispatch + CPU pinning
+- `src/publisher/publisher.cpp` - publisher loop and transport setup
+- `src/subscriber-s/subscriber.cpp` - SHM consumer and latency sampling
+- `src/subscriber-l/subscriber.cpp` - socket consumer and latency sampling
+- `src/common/ringbuffer.h` - SPSC queue + shared region
+- `src/common/latency_stats.h` - percentile summary logic
+
+
+
 
