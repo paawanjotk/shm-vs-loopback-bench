@@ -1,6 +1,7 @@
 #include "subscriber.h"
 #include "../common/latency_stats.h"
 #include "../common/quote.h"
+#include "../common/ringbuffer.h"
 #include "../common/tsc_clock.h"
 
 #include <chrono>
@@ -12,8 +13,8 @@
 #include <unistd.h>
 
 namespace {
-constexpr size_t kWarmupMessages = 10000;
-constexpr size_t kMeasureMessages = 200000;
+constexpr size_t kWarmupMessages = 100000;
+constexpr size_t kMeasureMessages = 1000000;
 
 bool read_full(int fd, void* buffer, size_t bytes) {
     auto* out = static_cast<uint8_t*>(buffer);
@@ -42,7 +43,16 @@ bool SubscriberLoopback::connect() {
         fmt::print("[SubscriberLoopback] Failed to create socket\n");
         return false;
     }
-    
+
+    int rcvbuf = static_cast<int>(kMarketQueueSize * sizeof(MarketMessageData));
+    if (setsockopt(socket_fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) == -1) {
+        fmt::print("[SubscriberLoopback] Warning: setsockopt SO_RCVBUF failed\n");
+    }
+    int actual_rcvbuf = 0;
+    socklen_t optlen = sizeof(actual_rcvbuf);
+    getsockopt(socket_fd_, SOL_SOCKET, SO_RCVBUF, &actual_rcvbuf, &optlen);
+    fmt::print("[SubscriberLoopback] SO_RCVBUF={} bytes\n", actual_rcvbuf);
+
     // Setup socket address
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;

@@ -13,8 +13,8 @@
 #include <unistd.h>
 
 namespace {
-constexpr size_t kWarmupMessages = 10000;
-constexpr size_t kMeasureMessages = 200000;
+constexpr size_t kWarmupMessages = 100000;
+constexpr size_t kMeasureMessages = 1000000;
 }
 
 SubscriberSharedMemory::SubscriberSharedMemory() {}
@@ -66,8 +66,9 @@ bool SubscriberSharedMemory::connect() {
     constexpr int MAX_READY_RETRIES = 100;
     for (int i = 0; i < MAX_READY_RETRIES; ++i) {
         if (region->ready.load(std::memory_order_acquire) == 1) {
+            region->consumer_present.store(1, std::memory_order_release);
             connected_ = true;
-            fmt::print("[SubscriberSharedMemory] Queue ready\n");
+            fmt::print("[SubscriberSharedMemory] Queue ready, signaled consumer_present=1\n");
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -91,6 +92,8 @@ bool SubscriberSharedMemory::read(MarketMessageData& data) {
 
 void SubscriberSharedMemory::disconnect() {
     if (shm_ptr_ != nullptr) {
+        auto* region = reinterpret_cast<SharedMarketDataRegion*>(shm_ptr_);
+        region->consumer_present.store(0, std::memory_order_release);
         size_t shm_size = sizeof(SharedMarketDataRegion);
         munmap(shm_ptr_, shm_size);
         shm_ptr_ = nullptr;

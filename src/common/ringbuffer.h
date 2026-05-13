@@ -4,7 +4,7 @@
 #include <atomic>
 #include "quote.h"
 
-constexpr size_t kMarketQueueSize = 1024;
+constexpr size_t kMarketQueueSize = 8192;
 
 template <typename T, size_t size>
 class SPSCQueue {
@@ -23,6 +23,6 @@ class SPSCQueue {
 
 struct SharedMarketDataRegion {
     std::atomic<uint32_t> ready{0};
-    uint32_t reserved{0};
+    std::atomic<uint32_t> consumer_present{0};
     alignas(64) SPSCQueue<MarketMessageData, kMarketQueueSize> queue;
 };

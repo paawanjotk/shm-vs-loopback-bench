@@ -1,6 +1,7 @@
 #include "publisher.h"
 
 #include "../common/quote.h"
+#include "../common/ringbuffer.h"
 #include "../common/tsc_clock.h"
 #include "xorshift.h"
 
@@ -15,6 +16,8 @@
 namespace {
 constexpr const char* kShmName = "tryhard";
 constexpr const char* kSocketPath = "/tmp/market.sock";
+constexpr int kSocketBufBytes = static_cast<int>(kMarketQueueSize * sizeof(MarketMessageData));
+constexpr uint32_t kAcceptPollMask = 0xFFFu;  // Poll accept() every 4096 iterations.
 }
 
 SharedMarketDataRegion* Publisher::create_shared_region(const char* name) {
@@ -97,11 +100,21 @@ void Publisher::run() {
     }
 
     uint64_t message_count = 0;
+    uint64_t shm_dropped = 0;
+    uint32_t accept_poll_counter = 0;
     while (true) {
-        if (server_fd != -1 && client_fd == -1) {
+        if (server_fd != -1 && client_fd == -1 &&
+            ((accept_poll_counter++ & kAcceptPollMask) == 0)) {
             client_fd = accept(server_fd, nullptr, nullptr);
             if (client_fd != -1) {
-                fmt::print("[Publisher] Socket subscriber connected\n");
+                int sndbuf = kSocketBufBytes;
+                if (setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) == -1) {
+                    perror("setsockopt SO_SNDBUF");
+                }
+                int actual_sndbuf = 0;
+                socklen_t optlen = sizeof(actual_sndbuf);
+                getsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &actual_sndbuf, &optlen);
+                fmt::print("[Publisher] Socket subscriber connected (SO_SNDBUF={} bytes)\n", actual_sndbuf);
             }
         }
 
@@ -115,8 +128,15 @@ void Publisher::run() {
         };
 
         if (region) {
-            msg.shm_timestamp = rdtsc_ordered();
-            while (!region->queue.push(msg)) {
+            while (true) {
+                msg.shm_timestamp = rdtsc_ordered();
+                if (region->queue.push(msg)) {
+                    break;
+                }
+                if (region->consumer_present.load(std::memory_order_acquire) != 1) {
+                    ++shm_dropped;
+                    break;
+                }
                 __builtin_ia32_pause();
             }
         }
@@ -131,10 +151,11 @@ void Publisher::run() {
         }
 
         ++message_count;
-        if (message_count % 1000000 == 0) {
-            fmt::print("[Publisher] published={} mode={}\n",
-                       message_count,
-                       mode_ == PublisherMode::SHM_ONLY ? "shm" : mode_ == PublisherMode::SOCKET_ONLY ? "socket" : "both");
-        }
+        // if (message_count % 1000000 == 0) {
+        //     const char* mode_label = mode_ == PublisherMode::SHM_ONLY ? "shm"
+        //         : mode_ == PublisherMode::SOCKET_ONLY ? "socket" : "both";
+        //     fmt::print("[Publisher] published={} mode={} shm_dropped={}\n",
+        //                message_count, mode_label, shm_dropped);
+        // }
     }
 }
