@@ -1,4 +1,4 @@
-# HFTProject
+# fast inter-process communication related project - shared memory & loopback socket
 
 A small single-producer / multi-consumer latency benchmark comparing two IPC transports for market-data style messages on Linux x86_64:
 
