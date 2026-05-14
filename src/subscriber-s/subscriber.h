@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../common/benchmark_options.h"
 #include "../common/quote.h"
 #include "../common/ringbuffer.h"
 #include <cstddef>
@@ -18,8 +19,8 @@ public:
     // Read market data from shared memory queue
     bool read(MarketMessageData& data);
     
-    // Run subscriber loop
-    void run();
+    // Run subscriber loop (options from CLI: --json --run-id= --bench-mode=)
+    void run(const BenchmarkOptions& options = BenchmarkOptions{});
     
     // Disconnect from shared memory
     void disconnect();

@@ -24,6 +24,43 @@ cmake --build build
 
 Binary: `build/HFTApp`
 
+## Machine-readable results (demo / automation)
+
+Subscribers can emit a single JSON object on **stdout** (logs on **stderr**):
+
+```bash
+./build/HFTApp subscriber-shm --json --run-id=myrun --bench-mode=latency
+./build/HFTApp subscriber-socket --json --run-id=myrun --bench-mode=latency
+```
+
+Fields include latency percentiles (`latency_ns`), wall-clock over the measured window, throughput estimate, queue capacity, and effective `SO_RCVBUF` for the socket path.
+
+## Web demo (Streamlit + FastAPI) and Docker
+
+Hybrid **replay-first** UI with optional **live** benchmarks (same roles as CLI), plus optional **`perf stat`** / **FlameGraph** profiling hooks from the API.
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r demo/requirements.txt
+export PYTHONPATH="$(pwd)"
+export HFTAPP_BIN="$(pwd)/build/HFTApp"
+uvicorn demo.api.main:app --host 127.0.0.1 --port 8000 &
+streamlit run demo/frontend/app.py --server.port 8501
+```
+
+Docker (expects **Linux x86_64**; compose uses `ipc: shareable` for POSIX shared memory between processes in the container):
+
+```bash
+docker compose build
+docker compose up
+```
+
+- API: `http://localhost:8000` (`GET /health`, `POST /api/runs/latency`, `POST /api/runs/throughput`, `GET /api/replays`, …)
+- UI: `http://localhost:8501`
+
+For **`perf record`** / flamegraphs inside Docker you may need extra privileges (see comments in `docker-compose.yml`). Set **`FLAMEGRAPH_HOME`** to a [FlameGraph](https://github.com/brendangregg/FlameGraph) checkout when using the flamegraph option.
+
 ## Roles
 
 | Role | CPU | Purpose |
@@ -149,6 +186,9 @@ Start here if you want to inspect the implementation:
 - `src/subscriber-l/subscriber.cpp` - socket consumer and latency sampling
 - `src/common/ringbuffer.h` - SPSC queue + shared region
 - `src/common/latency_stats.h` - percentile summary logic
+- `src/common/benchmark_json.h` - JSON line for subscriber results
+- `src/common/benchmark_options.h` - `--json` / `--run-id` / `--bench-mode` parsing
+- `demo/` - FastAPI runner, Streamlit UI, sample replay
 
 
 

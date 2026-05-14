@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../common/benchmark_options.h"
 #include "../common/quote.h"
 #include <string>
 
@@ -16,8 +17,7 @@ public:
     // Receive market data from socket
     bool receive(MarketMessageData& data, int64_t& now);
     
-    // Run subscriber loop
-    void run();
+    void run(const BenchmarkOptions& options = BenchmarkOptions{});
     
     // Disconnect from socket
     void disconnect();

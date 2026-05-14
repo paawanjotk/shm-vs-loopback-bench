@@ -4,6 +4,7 @@
 #include "subscriber-l/subscriber.h"
 #include "subscriber-s/subscriber.h"
 #include "common/tsc_clock.h"
+#include "common/benchmark_options.h"
 using namespace std;
 
 int main(int argc, char* argv[]) {
@@ -52,8 +53,9 @@ int main(int argc, char* argv[]) {
         }
         init_tsc_clock();
         cout<<"Starting Subscriber shared memory"<<endl;
+        const BenchmarkOptions bench_opts = parse_benchmark_options(argc, argv, 2);
         SubscriberSharedMemory sub_s;
-        sub_s.run();
+        sub_s.run(bench_opts);
         return 0;
     }
     else if(role == "subscriber-socket" || role == "subscriber-loopback"){
@@ -63,8 +65,9 @@ int main(int argc, char* argv[]) {
         }
         init_tsc_clock();
         cout<<"Starting Subscriber socket"<<endl;
+        const BenchmarkOptions bench_opts = parse_benchmark_options(argc, argv, 2);
         SubscriberLoopback sub_l;
-        sub_l.run();
+        sub_l.run(bench_opts);
         return 0;
     }
     else{

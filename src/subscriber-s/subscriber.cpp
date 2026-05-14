@@ -1,4 +1,5 @@
 #include "subscriber.h"
+#include "../common/benchmark_json.h"
 #include "../common/latency_stats.h"
 #include "../common/quote.h"
 #include "../common/ringbuffer.h"
@@ -29,7 +30,7 @@ bool SubscriberSharedMemory::connect() {
     const int RETRY_DELAY_MS = 500;  // 500ms between attempts = 15 seconds total
     
     for (int attempt = 1; attempt <= MAX_RETRIES; ++attempt) {
-        fmt::print("[SubscriberSharedMemory] Attempting to open shared memory {} (attempt {}/{})\n",
+        fmt::print(stderr, "[SubscriberSharedMemory] Attempting to open shared memory {} (attempt {}/{})\n",
                    SHARED_MEMORY_NAME, attempt, MAX_RETRIES);
         
         shm_fd_ = shm_open(SHARED_MEMORY_NAME, O_RDWR, 0666);
@@ -43,20 +44,20 @@ bool SubscriberSharedMemory::connect() {
     }
     
     if (shm_fd_ == -1) {
-        fmt::print("[SubscriberSharedMemory] Failed to open shared memory after {} attempts\n", MAX_RETRIES);
+        fmt::print(stderr, "[SubscriberSharedMemory] Failed to open shared memory after {} attempts\n", MAX_RETRIES);
         return false;
     }
     
-    fmt::print("[SubscriberSharedMemory] Successfully opened shared memory: {}\n", SHARED_MEMORY_NAME);
+    fmt::print(stderr, "[SubscriberSharedMemory] Successfully opened shared memory: {}\n", SHARED_MEMORY_NAME);
     
     // Map shared memory
     size_t shm_size = sizeof(SharedMarketDataRegion);
-    fmt::print("[SubscriberSharedMemory] Mapping {} bytes...\n", shm_size);
+    fmt::print(stderr, "[SubscriberSharedMemory] Mapping {} bytes...\n", shm_size);
     
     shm_ptr_ = mmap(nullptr, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
     
     if (shm_ptr_ == MAP_FAILED) {
-        fmt::print("[SubscriberSharedMemory] Failed to map shared memory\n");
+        fmt::print(stderr, "[SubscriberSharedMemory] Failed to map shared memory\n");
         close(shm_fd_);
         shm_fd_ = -1;
         return false;
@@ -68,12 +69,12 @@ bool SubscriberSharedMemory::connect() {
         if (region->ready.load(std::memory_order_acquire) == 1) {
             region->consumer_present.store(1, std::memory_order_release);
             connected_ = true;
-            fmt::print("[SubscriberSharedMemory] Queue ready, signaled consumer_present=1\n");
+            fmt::print(stderr, "[SubscriberSharedMemory] Queue ready, signaled consumer_present=1\n");
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    fmt::print("[SubscriberSharedMemory] Timed out waiting for queue ready flag\n");
+    fmt::print(stderr, "[SubscriberSharedMemory] Timed out waiting for queue ready flag\n");
     munmap(shm_ptr_, shm_size);
     shm_ptr_ = nullptr;
     close(shm_fd_);
@@ -105,26 +106,30 @@ void SubscriberSharedMemory::disconnect() {
     }
     
     connected_ = false;
-    fmt::print("[SubscriberSharedMemory] Disconnected from shared memory\n");
+    fmt::print(stderr, "[SubscriberSharedMemory] Disconnected from shared memory\n");
 }
 
 bool SubscriberSharedMemory::is_connected() const {
     return connected_;
 }
 
-void SubscriberSharedMemory::run() {
-    fmt::print("[SubscriberSharedMemory] Starting subscriber-shared-memory...\n");
-    
+void SubscriberSharedMemory::run(const BenchmarkOptions& options) {
+    fmt::print(stderr, "[SubscriberSharedMemory] Starting subscriber-shared-memory...\n");
+
     if (!connect()) {
-        fmt::print("[SubscriberSharedMemory] Failed to connect to publisher shared memory\n");
+        fmt::print(stderr, "[SubscriberSharedMemory] Failed to connect to publisher shared memory\n");
         return;
     }
-    
+
     const TSCClock tsc = init_tsc_clock();
     MarketMessageData data;
     uint64_t message_count = 0;
     std::vector<uint64_t> latency_samples;
     latency_samples.reserve(kMeasureMessages);
+
+    using clock = std::chrono::steady_clock;
+    clock::time_point wall_start{};
+    bool wall_started = false;
 
     while (is_connected()) {
         if (read(data)) {
@@ -135,9 +140,14 @@ void SubscriberSharedMemory::run() {
                 continue;
             }
 
+            if (!wall_started) {
+                wall_start = clock::now();
+                wall_started = true;
+            }
             latency_samples.push_back(cycles);
             if (latency_samples.size() % 100000 == 0) {
-                fmt::print("[SubscriberSharedMemory] measured={} warmup={}\n", latency_samples.size(), kWarmupMessages);
+                fmt::print(stderr, "[SubscriberSharedMemory] measured={} warmup={}\n", latency_samples.size(),
+                           kWarmupMessages);
             }
             if (latency_samples.size() >= kMeasureMessages) {
                 break;
@@ -147,11 +157,32 @@ void SubscriberSharedMemory::run() {
         }
     }
 
+    const clock::time_point wall_end = clock::now();
+    const double wall_seconds =
+        wall_started ? std::chrono::duration<double>(wall_end - wall_start).count() : 0.0;
+
     LatencySummaryNs summary = summarize_cycles(latency_samples, tsc.cycles_per_ns);
-    print_summary("shm", latency_samples.size(), summary);
-    fmt::print("[SubscriberSharedMemory] total_received={} warmup={} measured={}\n",
-               message_count,
-               kWarmupMessages,
-               latency_samples.size());
+
+    if (options.json_output) {
+        BenchmarkResultPayload payload;
+        payload.run_id = options.run_id;
+        payload.role = "subscriber-shm";
+        payload.transport = "shm";
+        payload.bench_mode = options.bench_mode;
+        payload.warmup_messages = kWarmupMessages;
+        payload.measure_messages = kMeasureMessages;
+        payload.total_received = message_count;
+        payload.measured_samples = latency_samples.size();
+        payload.queue_capacity_slots = QUEUE_SIZE;
+        payload.socket_rcvbuf_bytes = -1;
+        payload.cycles_per_ns = tsc.cycles_per_ns;
+        payload.latency = summary;
+        payload.wall_seconds = wall_seconds;
+        fmt::print(stdout, "{}\n", benchmark_result_to_json(payload));
+    } else {
+        print_summary("shm", latency_samples.size(), summary);
+    }
+    fmt::print(stderr, "[SubscriberSharedMemory] total_received={} warmup={} measured={}\n", message_count,
+               kWarmupMessages, latency_samples.size());
     disconnect();
 }

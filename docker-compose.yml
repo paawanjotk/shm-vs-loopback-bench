@@ -1,0 +1,26 @@
+# IPC demo: FastAPI (8000) + Streamlit (8501). Target: Linux x86_64.
+services:
+  hft-ipc-demo:
+    build: .
+    image: hft-ipc-demo:latest
+    ports:
+      - "8001:8000"
+      - "8501:8501"
+    environment:
+      - PYTHONPATH=/app
+      - HFTAPP_BIN=/opt/hft/bin/HFTApp
+      - HFT_REPLAY_DIR=/data/replays
+      - HFT_API_URL=http://127.0.0.1:8000
+      # Optional: clone FlameGraph and mount or bake FLAMEGRAPH_HOME for flamegraphs
+      # - FLAMEGRAPH_HOME=/opt/FlameGraph
+    volumes:
+      - hft-replays:/data/replays
+    ipc: shareable
+    shm_size: "256mb"
+    # For perf record inside the container you may need one of:
+    # privileged: true
+    # cap_add: [SYS_ADMIN]
+    # security_opt: ["seccomp:unconfined"]
+
+volumes:
+  hft-replays:

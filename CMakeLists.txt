@@ -8,7 +8,6 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -O3")
 
 # Find required packages
 find_package(fmt REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system)
 
 add_executable(HFTApp 
     src/main.cpp 
@@ -22,13 +21,11 @@ add_executable(HFTApp
 # Include directories
 target_include_directories(HFTApp PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${Boost_INCLUDE_DIRS}
 )
 
 # Link libraries
 target_link_libraries(HFTApp PRIVATE
     fmt::fmt
-    ${Boost_LIBRARIES}
     rt
     pthread
 )
