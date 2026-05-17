@@ -1,11 +1,12 @@
-# IPC demo: FastAPI (8000) + Streamlit (8501). Target: Linux x86_64.
+# IPC demo: API and Streamlit are separate services so benchmarks (HFTApp) are not
+# time-sliced with the UI in one container. Target: Linux x86_64.
 services:
-  hft-ipc-demo:
+  hft-ipc-api:
     build: .
     image: hft-ipc-demo:latest
+    entrypoint: ["/entrypoint-api.sh"]
     ports:
       - "8001:8000"
-      - "8501:8501"
     environment:
       - PYTHONPATH=/app
       - HFTAPP_BIN=/opt/hft/bin/HFTApp
@@ -17,10 +18,29 @@ services:
       - hft-replays:/data/replays
     ipc: shareable
     shm_size: "256mb"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
     # For perf record inside the container you may need one of:
     # privileged: true
     # cap_add: [SYS_ADMIN]
     # security_opt: ["seccomp:unconfined"]
+
+  hft-ipc-demo:
+    build: .
+    image: hft-ipc-demo:latest
+    entrypoint: ["/entrypoint-demo-ui.sh"]
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONPATH=/app
+      - HFT_API_URL=http://hft-ipc-api:8000
+    depends_on:
+      hft-ipc-api:
+        condition: service_healthy
 
 volumes:
   hft-replays:

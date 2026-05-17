@@ -16,8 +16,7 @@ from pydantic import BaseModel
 from .runner import (
     build_replay_payload,
     default_hftapp_bin,
-    run_latency_comparison,
-    run_throughput_comparison,
+    run_benchmark,
     save_replay,
 )
 
@@ -31,20 +30,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_GONE_BENCHMARK = (
+    "Removed: use POST /api/runs/benchmark (isolated publisher-shm then publisher-socket; "
+    "latency and throughput per transport in one run)."
+)
+
 
 def replay_dir() -> Path:
     root = Path(__file__).resolve().parents[2]
     return Path(os.environ.get("HFT_REPLAY_DIR", str(root / "demo" / "replays")))
 
 
-class LatencyRunRequest(BaseModel):
+class BenchmarkRunRequest(BaseModel):
     run_id: Optional[str] = None
-    profile: bool = False
-    flamegraph: bool = False
-
-
-class ThroughputRunRequest(BaseModel):
-    run_id: Optional[str] = None
+    timeout_sec: Optional[float] = None
 
 
 @app.get("/health")
@@ -52,29 +51,12 @@ def health() -> dict[str, str]:
     return {"status": "ok", "hftapp": default_hftapp_bin()}
 
 
-@app.post("/api/runs/latency")
-def post_latency_run(body: LatencyRunRequest) -> dict[str, Any]:
+@app.post("/api/runs/benchmark")
+def post_benchmark_run(body: BenchmarkRunRequest) -> dict[str, Any]:
     rid = body.run_id or str(uuid.uuid4())
-    result = run_latency_comparison(run_id=rid, profile=body.profile, flamegraph=body.flamegraph)
+    result = run_benchmark(run_id=rid, timeout_sec=body.timeout_sec)
     payload = build_replay_payload(
-        "latency",
-        result.run_id,
-        result.shm,
-        result.socket,
-        profile=result.profile,
-    )
-    payload["errors"] = result.errors
-    path = save_replay(replay_dir(), payload)
-    payload["saved_replay"] = str(path)
-    return payload
-
-
-@app.post("/api/runs/throughput")
-def post_throughput_run(body: ThroughputRunRequest) -> dict[str, Any]:
-    rid = body.run_id or str(uuid.uuid4())
-    result = run_throughput_comparison(run_id=rid)
-    payload = build_replay_payload(
-        "throughput",
+        "benchmark",
         result.run_id,
         result.shm,
         result.socket,
@@ -84,6 +66,16 @@ def post_throughput_run(body: ThroughputRunRequest) -> dict[str, Any]:
     path = save_replay(replay_dir(), payload)
     payload["saved_replay"] = str(path)
     return payload
+
+
+@app.post("/api/runs/latency")
+def post_latency_run_removed() -> None:
+    raise HTTPException(status_code=410, detail=_GONE_BENCHMARK)
+
+
+@app.post("/api/runs/throughput")
+def post_throughput_run_removed() -> None:
+    raise HTTPException(status_code=410, detail=_GONE_BENCHMARK)
 
 
 @app.get("/api/replays")

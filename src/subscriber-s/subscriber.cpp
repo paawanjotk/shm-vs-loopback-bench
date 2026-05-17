@@ -94,6 +94,7 @@ bool SubscriberSharedMemory::read(MarketMessageData& data) {
 void SubscriberSharedMemory::disconnect() {
     if (shm_ptr_ != nullptr) {
         auto* region = reinterpret_cast<SharedMarketDataRegion*>(shm_ptr_);
+        region->pause_publish.store(0, std::memory_order_release);
         region->consumer_present.store(0, std::memory_order_release);
         size_t shm_size = sizeof(SharedMarketDataRegion);
         munmap(shm_ptr_, shm_size);
@@ -131,12 +132,28 @@ void SubscriberSharedMemory::run(const BenchmarkOptions& options) {
     clock::time_point wall_start{};
     bool wall_started = false;
 
+    bool handoff_drain_done = false;
+    const bool pending_handoff_drain = (options.bench_mode == "benchmark");
+
     while (is_connected()) {
         if (read(data)) {
             uint64_t t_sub_shm = rdtsc_ordered();
             uint64_t cycles = t_sub_shm - data.shm_timestamp;
             ++message_count;
             if (message_count <= kWarmupMessages) {
+                continue;
+            }
+
+            if (!handoff_drain_done && pending_handoff_drain) {
+                auto* region = reinterpret_cast<SharedMarketDataRegion*>(shm_ptr_);
+                region->pause_publish.store(1, std::memory_order_release);
+                MarketMessageData drain_msg;
+                while (read(drain_msg)) {
+                    ++message_count;
+                }
+                fmt::print(stderr, "[SubscriberSharedMemory] shm_handoff_drain_done\n");
+                region->pause_publish.store(0, std::memory_order_release);
+                handoff_drain_done = true;
                 continue;
             }
 
@@ -162,6 +179,7 @@ void SubscriberSharedMemory::run(const BenchmarkOptions& options) {
         wall_started ? std::chrono::duration<double>(wall_end - wall_start).count() : 0.0;
 
     LatencySummaryNs summary = summarize_cycles(latency_samples, tsc.cycles_per_ns);
+    const bool shm_handoff_latency = pending_handoff_drain && handoff_drain_done;
 
     if (options.json_output) {
         BenchmarkResultPayload payload;
@@ -178,6 +196,7 @@ void SubscriberSharedMemory::run(const BenchmarkOptions& options) {
         payload.cycles_per_ns = tsc.cycles_per_ns;
         payload.latency = summary;
         payload.wall_seconds = wall_seconds;
+        payload.shm_handoff_latency = shm_handoff_latency;
         fmt::print(stdout, "{}\n", benchmark_result_to_json(payload));
     } else {
         print_summary("shm", latency_samples.size(), summary);

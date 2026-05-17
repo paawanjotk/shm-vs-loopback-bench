@@ -24,5 +24,7 @@ class SPSCQueue {
 struct SharedMarketDataRegion {
     std::atomic<uint32_t> ready{0};
     std::atomic<uint32_t> consumer_present{0};
+    /// When non-zero, publisher-shm must not enqueue (handoff benchmark drain).
+    std::atomic<uint32_t> pause_publish{0};
     alignas(64) SPSCQueue<MarketMessageData, kMarketQueueSize> queue;
 };

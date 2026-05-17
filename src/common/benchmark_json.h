@@ -21,6 +21,7 @@ struct BenchmarkResultPayload {
     double cycles_per_ns = 0.0;
     LatencySummaryNs latency{};
     double wall_seconds = 0.0;
+    bool shm_handoff_latency = false;  // true when SHM used pause+drain (bench_mode=benchmark)
 };
 
 inline std::string json_escape(std::string_view s) {
@@ -71,7 +72,8 @@ inline std::string benchmark_result_to_json(const BenchmarkResultPayload& p) {
         "\"cycles_per_ns\":{:.9f},"
         "\"latency_ns\":{{\"min\":{:.6f},\"p50\":{:.6f},\"p99\":{:.6f},\"p999\":{:.6f},\"max\":{:.6f}}},"
         "\"wall_seconds\":{:.9f},"
-        "\"throughput_messages_per_sec\":{:.6f}"
+        "\"throughput_messages_per_sec\":{:.6f},"
+        "\"shm_handoff_latency\":{}"
         "}}",
         p.schema_version,
         json_escape(p.run_id),
@@ -91,5 +93,6 @@ inline std::string benchmark_result_to_json(const BenchmarkResultPayload& p) {
         p.latency.p999_ns,
         p.latency.max_ns,
         p.wall_seconds,
-        tput);
+        tput,
+        p.shm_handoff_latency ? "true" : "false");
 }

@@ -33,11 +33,25 @@ Subscribers can emit a single JSON object on **stdout** (logs on **stderr**):
 ./build/HFTApp subscriber-socket --json --run-id=myrun --bench-mode=latency
 ```
 
-Fields include latency percentiles (`latency_ns`), wall-clock over the measured window, throughput estimate, queue capacity, and effective `SO_RCVBUF` for the socket path.
+Fields include latency percentiles (`latency_ns`), wall-clock over the measured window, throughput estimate, queue capacity, effective `SO_RCVBUF` for the socket path, and **`shm_handoff_latency`** (`true` when SHM used pause+drain for `bench_mode=benchmark`).
 
 ## Web demo (Streamlit + FastAPI) and Docker
 
-Hybrid **replay-first** UI with optional **live** benchmarks (same roles as CLI), plus optional **`perf stat`** / **FlameGraph** profiling hooks from the API.
+Hybrid **replay-first** UI with optional **live** benchmark via **`POST /api/runs/benchmark`** (isolated topology only; same subscriber JSON fields as the CLI).
+
+### What the Streamlit demo supports today
+
+The Streamlit app is an audience-facing dashboard for the current IPC comparison. It currently supports:
+
+- Loading the built-in sample replay so visitors can see representative SHM-vs-socket results immediately, without running a benchmark.
+- Pointing the UI at a FastAPI backend by editing the **API base URL** in the sidebar.
+- Triggering one live benchmark from the browser: isolated **`publisher-shm` + `subscriber-shm`**, then isolated **`publisher-socket` + `subscriber-socket`**.
+- Showing latency percentiles (`min`, `p50`, `p99`, `p99.9`) for SHM and socket side by side in a table.
+- Rendering separate latency charts for SHM and socket, so nanosecond-scale SHM values are not visually flattened by socket tail latency.
+- Rendering measured throughput in messages/sec for both transports from the same subscriber measurement window.
+- Displaying run metadata such as run id, mode, topology-backed result shape, and any benchmark errors returned by the API.
+- Explaining, inside the UI, how the SHM path differs from the Unix domain socket path and how to interpret queue dwell, scheduler effects, buffering, and near-1x p50 results.
+
 
 ```bash
 python3 -m venv .venv
@@ -49,17 +63,21 @@ uvicorn demo.api.main:app --host 127.0.0.1 --port 8000 &
 streamlit run demo/frontend/app.py --server.port 8501
 ```
 
-Docker (expects **Linux x86_64**; compose uses `ipc: shareable` for POSIX shared memory between processes in the container):
+Docker (expects **Linux x86_64**; compose runs **two services**: the API container holds `ipc: shareable` and shared memory for `HFTApp`, while Streamlit runs separately so throughput benchmarks are not competing with the UI in the same cgroup.)
 
 ```bash
 docker compose build
 docker compose up
 ```
 
-- API: `http://localhost:8000` (`GET /health`, `POST /api/runs/latency`, `POST /api/runs/throughput`, `GET /api/replays`, …)
-- UI: `http://localhost:8501`
+- API: `http://localhost:8001` (`GET /health`, `POST /api/runs/benchmark`, `GET /api/replays`, …). `POST /api/runs/latency` and `POST /api/runs/throughput` return **410 Gone**; use **`/api/runs/benchmark`** (isolated SHM phase, then isolated socket). For API-only (no UI): `docker compose up hft-ipc-api`.
+- UI: `http://localhost:8501` (defaults to calling the API at `http://hft-ipc-api:8000` inside the compose network; override in the sidebar if needed.)
 
-For **`perf record`** / flamegraphs inside Docker you may need extra privileges (see comments in `docker-compose.yml`). Set **`FLAMEGRAPH_HOME`** to a [FlameGraph](https://github.com/brendangregg/FlameGraph) checkout when using the flamegraph option.
+Example (API on host port 8001):
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8001/api/runs/benchmark" -H "Content-Type: application/json" -d '{}'
+```
 
 ## Roles
 
@@ -119,58 +137,54 @@ This removes cross-transport interaction and gives the cleanest throughput numbe
 
 ## Current numbers
 
-### Latency (`publisher-both`)
+Showcase figures below are the **arithmetic mean of five consecutive** isolated runs (same pairing as `POST /api/runs/benchmark`: `publisher-shm` + `subscriber-shm`, then `publisher-socket` + `subscriber-socket`). Recorded on **Linux x86_64** in **May 2026** on one reference host; **your machine will differ** (CPU frequency, load, C-state behavior, TSC calibration).
 
-These are the useful transport-latency numbers.
+### Latency (isolated, same window as throughput)
 
 | Metric | SHM | Socket |
 |--------|----:|-------:|
-| min | ~80 ns | ~1.0 us |
-| p50 | ~175 ns | ~174 us |
-| p99 | ~250 ns | ~420 us |
-| p99.9 | ~3.7-4.2 us | ~0.71-0.78 ms |
+| min | ~66 ns | ~1.0 µs |
+| p50 | ~1.6 µs | ~180 µs |
+| p99 | ~228 µs | ~689 µs |
+| p99.9 | ~266 µs | ~816 µs |
+| max | ~270 µs | ~0.93 ms |
 
 Interpretation:
 
-- SHM best-case latency is about **12x lower** than socket best-case latency.
-- SHM typical latency is in the **hundreds of ns**.
-- Socket typical latency is in the **hundreds of us**.
-- Socket tail latency is much larger because it includes syscall, kernel buffering, wakeup, and scheduling effects.
+- **`min` is noisy** (outliers, TSC, reordering); prefer **p50** / **p99** for comparisons.
+- On this aggregate, **p50** is on the order of **~100×** lower on SHM than on the socket path (about **~1.6 µs** vs **~180 µs**).
+- Socket tails are dominated by syscall, kernel buffering, wakeups, and scheduling.
 
-### Throughput (isolated modes)
+### Throughput (same five runs)
 
-Throughput is:
+Throughput is still:
 
 ```text
-throughput = 1,100,000 / wall_clock_seconds
+throughput_messages_per_sec ≈ 1,000,000 / wall_seconds
 ```
 
-Measure it with:
+over the subscriber’s measured window (after warmup).
 
-```bash
-/usr/bin/time -f '%e s wall' ./build/HFTApp subscriber-shm
-/usr/bin/time -f '%e s wall' ./build/HFTApp subscriber-socket
-```
-
-Recent isolated runs on this machine:
-
-| Transport | Mode pairing | Wall clock | Throughput |
-|-----------|--------------|-----------:|-----------:|
-| SHM | `publisher-shm` + `subscriber-shm` | ~1.08 s | ~1.02 M msg/s |
-| Socket | `publisher-socket` + `subscriber-socket` | ~1.71-1.86 s | ~0.59-0.64 M msg/s |
+| Transport | Mode pairing | Mean wall clock | Mean throughput |
+|-----------|--------------|----------------:|----------------:|
+| SHM | `publisher-shm` + `subscriber-shm` | ~0.045 s | ~22.5 M msg/s |
+| Socket | `publisher-socket` + `subscriber-socket` | ~0.645 s | ~1.56 M msg/s |
 
 Interpretation:
 
-- SHM throughput is about **1.6x** socket throughput on this setup.
-- SHM isolated mode is around **1 million messages/sec**.
-- Socket isolated mode is around **0.6 million messages/sec**.
+- Mean SHM throughput is about **14×** mean socket throughput on this host for these runs.
+- Effective **`SO_RCVBUF`** reported in JSON for the socket path was **425984** bytes (unchanged across runs).
+
+To refresh these numbers, run five consecutive **`run_benchmark()`** calls from **`demo.api.runner`** (same orchestration as **`POST /api/runs/benchmark`**) with **`HFTAPP_BIN`** set to your **`build/HFTApp`**, then average the **`latency_ns`** and **`throughput_messages_per_sec`** / **`wall_seconds`** fields from each result.
 
 ## Important caveats
 
 - `min_ns` is the most direct indicator of raw messaging or handoff performance—a lower bound on the actual transport cost, without queuing or scheduling artifacts. It represents the best observed path under ideal conditions.
 - Percentiles like `p50` and `p99` incorporate effects of transient contention, scheduler interrupts, or jitter; they are valuable for understanding expected and tail behavior, but always expect some spread.
-- `publisher-both` is good for **latency comparison** and soak testing. Isolated publisher modes are better for **throughput**.
-- In SHM isolated mode, latency can become much larger and vary a lot if the queue stays non-empty. In that case you are measuring **queue dwell time + handoff cost**, not just raw shared-memory handoff.
+- The **HTTP API** uses **isolated** publishers only (`POST /api/runs/benchmark`). For a **same-instant** head-to-head under one combined feed, run **`publisher-both`** plus both subscribers manually in separate terminals.
+- **`SharedMarketDataRegion` layout** includes `pause_publish` for SHM handoff benchmarks; always run **matching** publisher and subscriber binaries from the same build.
+- For **`--bench-mode=benchmark`**, the SHM subscriber performs a **pause + drain** (shared `pause_publish` flag) after warmup so the measured window starts with an **empty ring**; JSON includes **`shm_handoff_latency": true`** when that path completed. Latency is **handoff-focused** (stamp-to-pop), not queue backlog. **Without** `benchmark` mode, SHM behavior is unchanged (no drain).
+- Manual **`subscriber-shm`** without **`benchmark`** mode: if the queue stays non-empty, latency reflects **queue dwell + handoff**, not handoff alone.
 - The publisher re-stamps `shm_timestamp` immediately before a successful SHM push, so publisher-side backpressure does not get counted as transport latency.
 - The SHM path is lossless while a consumer is attached and lossy otherwise. If no SHM consumer is attached, full-queue pushes are dropped and counted in `shm_dropped`.
 - Larger socket buffers reduce drops / blocking pressure but increase typical socket latency because messages sit longer in the kernel buffer.

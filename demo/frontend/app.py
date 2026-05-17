@@ -48,6 +48,11 @@ def render_comparison(replay: dict[str, Any]) -> None:
             "**Latency (ns)** — each transport uses **its own chart scale** so nanosecond SHM is not "
             "flattened by microsecond–millisecond socket tails. See the table for exact numbers side by side."
         )
+        if isinstance(shm, dict) and shm.get("shm_handoff_latency"):
+            st.caption(
+                "SHM row: **handoff latency** (`bench_mode=benchmark`: publisher pauses, ring drained after warmup). "
+                "Socket row: path latency (unchanged; not drain-synchronized)."
+            )
         labels, shm_vals = latency_percentile_values(lat_shm)
         _, sock_vals = latency_percentile_values(lat_sock)
         tbl = pd.DataFrame({"shm_ns": shm_vals, "socket_ns": sock_vals}, index=labels)
@@ -76,9 +81,23 @@ def render_comparison(replay: dict[str, Any]) -> None:
 
         if lat_shm.get("p50") and lat_sock.get("p50"):
             ratio = float(lat_sock["p50"]) / max(float(lat_shm["p50"]), 1e-9)
-            st.info(
-                f"Socket **p50** is ~**{ratio:.0f}×** SHM p50 in this replay (illustrative; your hardware may differ)."
-            )
+            if ratio < 1.0:
+                st.info(
+                    f"Socket **p50** is **{(1.0 / ratio):.1f}× lower** than SHM p50 in this replay. "
+                    "That can happen in isolated runs when the SHM ring refills faster than the consumer can drain it, "
+                    "so the SHM percentile includes queue dwell time rather than pure handoff cost."
+                )
+            elif ratio < 1.5:
+                st.info(
+                    f"Socket **p50** is about **{ratio:.1f}×** SHM p50 in this replay. "
+                    "A near-1× result usually means the run is dominated by scheduling, buffering, or SHM queue dwell, "
+                    "not the theoretical raw cost of the IPC primitive alone."
+                )
+            else:
+                st.info(
+                    f"Socket **p50** is about **{ratio:.1f}×** SHM p50 in this replay. "
+                    "Treat this as an observed result for this machine and load, not a universal constant."
+                )
 
     errs = replay.get("errors") or []
     if errs:
@@ -90,31 +109,50 @@ def render_pipeline_story() -> None:
     st.subheader("What you are comparing")
     st.markdown(
         """
-Two **local** IPC paths on Linux x86_64:
+This demo compares two **local** IPC paths on Linux x86_64. Both move the same synthetic market-data
+message shape, but they take very different routes through the machine:
 
 | Path | Mechanism | Typical cost drivers |
 |------|-----------|----------------------|
-| **SHM** | POSIX shared memory + **lock-free SPSC ring buffer** | cache misses, queue dwell time, consumer not attached |
-| **Socket** | Unix domain **SOCK_STREAM** (`/tmp/market.sock`) | `send`/`recv` syscalls, kernel buffers, scheduling wakeups |
+| **SHM** | POSIX shared memory + **lock-free SPSC ring buffer** | cache-line movement, consumer polling, queue dwell if producer outruns consumer |
+| **Socket** | Unix domain **SOCK_STREAM** (`/tmp/market.sock`) | `send`/`recv` syscalls, kernel buffering, wakeups, scheduler latency |
 
-**Latency mode** uses one publisher feeding **both** subscribers so both transports see the same synthetic stream.
+The **API** runs **`publisher-shm` + `subscriber-shm`**, then **`publisher-socket` + `subscriber-socket`**, so each transport is measured **in isolation**. Latency percentiles and throughput for a path come from the **same** subscriber window.
 
-**Throughput mode** runs each transport **in isolation** (cleaner max messages/sec).
+For SHM in `benchmark` mode, the publisher briefly pauses after warmup and the subscriber drains the
+ring before taking measured samples. That makes the start of the measured window handoff-focused. During
+the 1M-message window, however, a very fast publisher can still refill the ring; if that happens, SHM
+percentiles include some **queue dwell time** again.
+
+That is why you may occasionally see a message such as **"Socket p50 is about 1× SHM p50"**, or even a
+run where socket p50 appears lower. It does **not** mean sockets became fundamentally faster than shared
+memory. It usually means the measurement was dominated by queue depth, kernel buffering, CPU scheduling,
+or Docker/container contention. The clean interpretation is:
+
+- **SHM** shows the low-overhead user-space path, but it is sensitive to whether the ring stays shallow.
+- **Socket** shows the kernel-mediated path, where buffering and wakeups tend to raise typical and tail latency.
+- **Throughput** is measured in the same run, so a transport can have high throughput while still showing worse latency if messages wait in a buffer.
         """
     )
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("#### SHM lane (conceptual)")
-        st.caption("Producer writes into shared ring; consumer spins/polls in userspace.")
-        st.progress(0.15)
-        st.progress(0.45)
-        st.progress(0.85)
+        st.markdown("#### SHM path")
+        st.markdown(
+            """
+1. Publisher writes the message into a **shared ring buffer**.
+2. Consumer polls the same memory region and pops the next slot.
+3. No kernel handoff is needed for each message; the cost is mostly cache movement and any time spent waiting in the ring.
+            """
+        )
     with c2:
-        st.markdown("#### Socket lane (conceptual)")
-        st.caption("Producer `write()` → kernel buffer → consumer `read()` + wakeups.")
-        st.progress(0.25)
-        st.progress(0.55)
-        st.progress(0.95)
+        st.markdown("#### Socket path")
+        st.markdown(
+            """
+1. Publisher calls **`write()`**, entering the kernel.
+2. The kernel copies/buffers the bytes and wakes the receiver when data is available.
+3. Consumer calls **`read()`** and returns to user space with the message; latency includes syscalls, buffering, and scheduling.
+            """
+        )
 
 
 def render_profiling(replay: dict[str, Any]) -> None:
@@ -122,11 +160,8 @@ def render_profiling(replay: dict[str, Any]) -> None:
     if not prof:
         st.markdown(
             """
-Run a **live latency** benchmark from the sidebar with **Profile** enabled to capture an extra
-`perf stat` pass on an isolated **socket** subscriber (syscall / scheduler counters when `perf` is available).
-
-Optional **flamegraphs**: the API can attach SVG snippets under `profile.shm_flamegraph_svg` /
-`profile.socket_flamegraph_svg` when generated offline (e.g. `perf record` + FlameGraph).
+The live API no longer runs `perf` from the server. You can still attach profiling artifacts under
+`profile` (e.g. `socket_perf_stat` text or `socket_flamegraph_svg`) when you generate them offline.
             """
         )
         return
@@ -159,37 +194,19 @@ def main() -> None:
         st.markdown("### Sample replay")
         if st.button("Load built-in sample (README-scale)"):
             st.session_state["replay"] = load_replay_from_path(SAMPLE_REPLAY)
-            st.success("Loaded sample_latency.json")
+            st.success("Loaded built-in sample replay")
         st.divider()
         st.markdown("### Live benchmark (calls API)")
-        profile = st.checkbox("Enable profiling (`perf stat` on socket after latency run)", value=False)
-        flamegraph = st.checkbox(
-            "Also generate socket flamegraph (needs `perf`, `perl`, FLAMEGRAPH_HOME; very slow)",
-            value=False,
-        )
-        if st.button("Run latency comparison"):
-            try:
-                req_timeout = 3600 if flamegraph else 1200
-                r = requests.post(
-                    f"{api_base}/api/runs/latency",
-                    json={"profile": profile, "flamegraph": flamegraph},
-                    timeout=req_timeout,
-                )
-                r.raise_for_status()
-                st.session_state["replay"] = r.json()
-                st.success("Latency run complete (saved server-side)")
-            except Exception as e:
-                st.error(f"API error: {e}")
-        if st.button("Run throughput comparison"):
+        if st.button("Run benchmark (isolated SHM, then socket)"):
             try:
                 r = requests.post(
-                    f"{api_base}/api/runs/throughput",
+                    f"{api_base}/api/runs/benchmark",
                     json={},
                     timeout=1200,
                 )
                 r.raise_for_status()
                 st.session_state["replay"] = r.json()
-                st.success("Throughput run complete")
+                st.success("Benchmark complete (saved server-side)")
             except Exception as e:
                 st.error(f"API error: {e}")
 

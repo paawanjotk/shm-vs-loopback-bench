@@ -128,15 +128,19 @@ void Publisher::run() {
         };
 
         if (region) {
-            while (true) {
-                msg.shm_timestamp = rdtsc_ordered();
-                if (region->queue.push(msg)) {
-                    break;
+            if (region->pause_publish.load(std::memory_order_acquire) == 0) {
+                while (true) {
+                    msg.shm_timestamp = rdtsc_ordered();
+                    if (region->queue.push(msg)) {
+                        break;
+                    }
+                    if (region->consumer_present.load(std::memory_order_acquire) != 1) {
+                        ++shm_dropped;
+                        break;
+                    }
+                    __builtin_ia32_pause();
                 }
-                if (region->consumer_present.load(std::memory_order_acquire) != 1) {
-                    ++shm_dropped;
-                    break;
-                }
+            } else {
                 __builtin_ia32_pause();
             }
         }

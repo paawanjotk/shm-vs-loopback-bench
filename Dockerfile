@@ -40,9 +40,11 @@ RUN pip install --no-cache-dir -r /app/demo/requirements.txt
 
 COPY demo /app/demo
 COPY scripts/docker-entrypoint.sh /entrypoint.sh
+COPY scripts/docker-entrypoint-api.sh /entrypoint-api.sh
+COPY scripts/docker-entrypoint-demo-ui.sh /entrypoint-demo-ui.sh
 COPY --from=cpp-build /out/HFTApp /opt/hft/bin/HFTApp
 
-RUN chmod +x /opt/hft/bin/HFTApp /entrypoint.sh \
+RUN chmod +x /opt/hft/bin/HFTApp /entrypoint.sh /entrypoint-api.sh /entrypoint-demo-ui.sh \
     && mkdir -p /data/replays
 
 ENV PYTHONPATH=/app

@@ -2,14 +2,15 @@
   "schema_version": 1,
   "replay_kind": "ipc_comparison",
   "run_id": "sample-readme",
-  "mode": "latency",
+  "mode": "benchmark",
+  "topology": "isolated",
   "created_at": "2026-05-13T00:00:00+00:00",
   "shm": {
     "schema_version": 1,
     "run_id": "sample-readme",
     "role": "subscriber-shm",
     "transport": "shm",
-    "bench_mode": "latency",
+    "bench_mode": "benchmark",
     "warmup_messages": 100000,
     "measure_messages": 1000000,
     "total_received": 1100000,
@@ -18,21 +19,22 @@
     "socket_rcvbuf_bytes": -1,
     "cycles_per_ns": 4.0,
     "latency_ns": {
-      "min": 80,
-      "p50": 175,
-      "p99": 250,
-      "p999": 3900,
-      "max": 50000
+      "min": 66,
+      "p50": 1600,
+      "p99": 228000,
+      "p999": 266000,
+      "max": 270000
     },
-    "wall_seconds": 1.05,
-    "throughput_messages_per_sec": 952380
+    "wall_seconds": 0.045,
+    "throughput_messages_per_sec": 22500000,
+    "shm_handoff_latency": true
   },
   "socket": {
     "schema_version": 1,
     "run_id": "sample-readme",
     "role": "subscriber-socket",
     "transport": "socket",
-    "bench_mode": "latency",
+    "bench_mode": "benchmark",
     "warmup_messages": 100000,
     "measure_messages": 1000000,
     "total_received": 1100000,
@@ -42,13 +44,14 @@
     "cycles_per_ns": 4.0,
     "latency_ns": {
       "min": 1000,
-      "p50": 174000,
-      "p99": 420000,
-      "p999": 750000,
-      "max": 5000000
+      "p50": 180000,
+      "p99": 689000,
+      "p999": 816000,
+      "max": 930000
     },
-    "wall_seconds": 1.72,
-    "throughput_messages_per_sec": 581395
+    "wall_seconds": 0.645,
+    "throughput_messages_per_sec": 1560000,
+    "shm_handoff_latency": false
   },
   "profile": {},
   "errors": []
